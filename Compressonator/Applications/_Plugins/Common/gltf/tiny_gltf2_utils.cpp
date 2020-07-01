@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 
 #ifdef __clang__
 // Disable some warnings for external files.
@@ -1217,6 +1218,7 @@ namespace tinygltf2
         }
         else if (ParseNumberProperty(&num_val, err, o, prop, false))
         {
+            param->isNumber = true;
             param->number_array.push_back(num_val);
             return true;
         }
@@ -2390,6 +2392,7 @@ namespace tinygltf2
     bool TinyGLTF::LoadFromString(Model* model, std::string* err, const char* str, unsigned int length, const std::string& base_dir,
                                   bool use_draco_encode, unsigned int check_sections)
     {
+        auto start = std::chrono::high_resolution_clock::now();
         if (length < 4)
         {
             if (err)
@@ -2609,14 +2612,14 @@ namespace tinygltf2
                 int         mesh_primitive_size = (int)root.size();
 
 #ifndef USE_MULTIPLE_MESH_DECODE
-                if (mesh_primitive_size > 1)
+                /*if (mesh_primitive_size > 1)
                 {
                     if (err)
                     {
                         (*err) = "Note: Mesh decode under development. Only support one \"meshes\" for now.";
                     }
                     return false;
-                }
+                }*/
 #endif
                 json::const_iterator it(root.begin());
                 json::const_iterator itEnd(root.end());
@@ -3286,19 +3289,22 @@ namespace tinygltf2
             }
         }
 
+        auto end1 = std::chrono::high_resolution_clock::now();
+        double time_taken =
+            chrono::duration_cast<chrono::milliseconds>(end1 - start).count();
+        std::cout << "Read time: " << time_taken << std::endl;
+
         // Assign buffer to draco::mesh for draco encode case, expect only one buffer for now
         if (use_draco_encode)
         {
-            std::vector<unsigned char> buf_data    = model->buffers[0].data;
-            unsigned char*             buf_dataptr = nullptr;
             int                        data_stride = 0;
-            draco::Mesh* draco_en_mesh;   //temp holder when indexing draco mesh vector
+            draco_en_meshes.reserve(model->meshes.size());
 
             for (int m = 0; m < model->meshes.size(); m++)
             {
                 for (int n = 0; n < model->meshes[m].primitives.size(); n++)
                 {
-                    draco_en_mesh = new draco::Mesh();
+                    draco::Mesh* draco_en_mesh = new draco::Mesh();
                     for (std::map<std::string, int>::iterator attrIt = model->meshes[m].primitives[n].attributes.begin();
                         attrIt != model->meshes[m].primitives[n].attributes.end(); ++attrIt)
                     {
@@ -3331,10 +3337,12 @@ namespace tinygltf2
                         int byte_offset = 0;
                         int byte_offset_accessor = (int)model->accessors[attr_id].byteOffset;
                         int byte_offset_bufview = (int)model->bufferViews[bufferV_ind].byteOffset;
+                        int buffer_id = (int)model->bufferViews[bufferV_ind].buffer;
 
                         byte_offset = byte_offset_accessor + byte_offset_bufview;
-                        
-                        buf_dataptr = reinterpret_cast<unsigned char*>(&buf_data[0]);
+
+                        std::vector<unsigned char>& buf_data = model->buffers[buffer_id].data;
+                        unsigned char* buf_dataptr = reinterpret_cast<unsigned char*>(&buf_data[0]);
                         buf_dataptr += byte_offset;
 
                         draco::GeometryAttribute::Type type;
@@ -3350,12 +3358,17 @@ namespace tinygltf2
                         {
                             type = draco::GeometryAttribute::TEX_COORD;
                         }
+                        else if (attr_str.find("COLOR") != string::npos)
+                        {
+                            type = draco::GeometryAttribute::COLOR;
+                        }
                         else if (attr_str == "TANGENT")
                         {
                             type = draco::GeometryAttribute::GENERIC;
                         }
                         else
                         {
+                            assert(0);
                             if (err)
                             {
                                 (*err) += "Attribute [" + attr_str + "] not supported yet.";
@@ -3401,20 +3414,14 @@ namespace tinygltf2
                         }
 
                         att.Init(type, nullptr, comp_count, data_type, false, comp_count * draco::DataTypeLength(data_type), 0);
-                        
+
                         const int              dracoAttId = draco_en_mesh->AddAttribute(att, true, data_count);
                         draco::PointAttribute* attPtr = draco_en_mesh->attribute(dracoAttId);
 
-                        std::vector<uint8_t> buf;
-                        buf.clear();
-                        buf.resize(byte_length);
                         for (int ii = 0; ii < data_count; ii++)
                         {
                             //uint8_t*     ptr = &buf[0];
-                            vector<char> temp;
-                            temp.insert(temp.end(), buf_dataptr, buf_dataptr + (data_stride * comp_count));
-                            attPtr->SetAttributeValue(attPtr->mapped_index(draco::PointIndex(ii)), &temp[0]);
-                            temp.clear();
+                            attPtr->SetAttributeValue(attPtr->mapped_index(draco::PointIndex(ii)), buf_dataptr);
                             buf_dataptr += (data_stride * comp_count);
                         }
                     }
@@ -3426,22 +3433,27 @@ namespace tinygltf2
                         int accessor_ind = model->meshes[m].primitives[n].indices;
                         int num_idx = (int)model->accessors[accessor_ind].count;
                         int num_face = num_idx / 3;
+
+                        // need to have num_face > 0; encoder fails otherwise.
+                        assert(num_face > 0);
                         int bufferV_ind = model->accessors[accessor_ind].bufferView;
 
                         //retrieve index data
                         unsigned  byte_offset = 0;
                         unsigned byte_offset_accessor = (int)model->accessors[accessor_ind].byteOffset;
                         unsigned byte_offset_bufview = (int)model->bufferViews[bufferV_ind].byteOffset;
+                        int buffer_id = (int)model->bufferViews[bufferV_ind].buffer;
 
                         byte_offset = byte_offset_accessor + byte_offset_bufview;
 
-                        buf_data = model->buffers[0].data;
+                        std::vector<unsigned char>& buf_data = model->buffers[buffer_id].data;
+
                         if (buf_data.size() <= byte_offset)
                         {
                             (*err) = "Error loading: byte offset is bigger than byte length of data buffer.";
                             return false;
                         }
-                        buf_dataptr = reinterpret_cast<unsigned char*>(&buf_data[0]);
+                        unsigned char* buf_dataptr = reinterpret_cast<unsigned char*>(&buf_data[0]);
                         buf_dataptr += byte_offset;
 
                         int comp_type = model->accessors[accessor_ind].componentType;
@@ -3467,20 +3479,13 @@ namespace tinygltf2
                         }
 
                         draco::Mesh::Face     face;
-                        vector<unsigned char> temp;
                         for (int ii = 0; ii < num_face; ii++)
                         {
-                            temp.insert(temp.end(), buf_dataptr, buf_dataptr + data_stride);
-                            memcpy(&face[0], temp.data(), data_stride);
-                            temp.clear();
+                            memcpy(&face[0], buf_dataptr, data_stride);
                             buf_dataptr += data_stride;
-                            temp.insert(temp.end(), buf_dataptr, buf_dataptr + data_stride);
-                            memcpy(&face[1], temp.data(), data_stride);
-                            temp.clear();
+                            memcpy(&face[1], buf_dataptr, data_stride);
                             buf_dataptr += data_stride;
-                            temp.insert(temp.end(), buf_dataptr, buf_dataptr + data_stride);
-                            memcpy(&face[2], temp.data(), data_stride);
-                            temp.clear();
+                            memcpy(&face[2], buf_dataptr, data_stride);
                             buf_dataptr += data_stride;
                             draco_en_mesh->SetFace(draco::FaceIndex(ii), face);
                         }
@@ -3491,6 +3496,11 @@ namespace tinygltf2
                 }
             }
         }
+
+        auto end2 = std::chrono::high_resolution_clock::now();
+        time_taken =
+            chrono::duration_cast<chrono::milliseconds>(end2 - end1).count();
+        std::cout << "Draco Mesh Generation time: " << time_taken << std::endl;
 
         return true;
     }
@@ -3670,7 +3680,7 @@ namespace tinygltf2
 
         for (unsigned int i = 0; i < value.size(); ++i)
         {
-            vals.push_back(static_cast<double>(value[i]));
+            vals.push_back((value[i]));
         }
         if (!vals.is_null())
         {
@@ -3774,7 +3784,12 @@ namespace tinygltf2
     {
         for (ParameterMap::iterator paramIt = param.begin(); paramIt != param.end(); ++paramIt)
         {
-            if (paramIt->second.number_array.size())
+            if (paramIt->second.isNumber)
+            {
+                assert(paramIt->second.number_array.size() == 1);
+                SerializeNumberProperty<double>(paramIt->first, paramIt->second.number_array[0], o);
+            }
+            else if (paramIt->second.number_array.size())
             {
                 SerializeNumberArrayProperty<double>(paramIt->first, paramIt->second.number_array, o);
             }
@@ -4048,6 +4063,10 @@ namespace tinygltf2
                     else if (khrattrIt->first.find("TEXCOORD") != string::npos)
                     {
                         type = draco::GeometryAttribute::TEX_COORD;
+                    }
+                    else if (khrattrIt->first.find("COLOR") != string::npos)
+                    {
+                        type = draco::GeometryAttribute::COLOR;
                     }
                     else
                     {
@@ -4326,6 +4345,10 @@ namespace tinygltf2
                     {
                         type = "VEC2";
                     }
+                    else if (x.first.find("COLOR") != string::npos)
+                    {
+                        type = "VEC4";
+                    }
                     else if (x.first == "NORMAL")
                     {
                         type = "VEC3";
@@ -4375,6 +4398,9 @@ namespace tinygltf2
             for (unsigned int i = 0; i < model->accessors.size(); ++i)
             {
                 json accessor;
+                if(use_draco_encode)
+                    model->accessors[i].byteOffset = 0;
+
                 SerializeGltfAccessor(model->accessors[i], accessor, use_draco_encode);
                 accessors.push_back(accessor);
             }
@@ -4466,6 +4492,25 @@ namespace tinygltf2
                                 return false;
                             char* pFloat = reinterpret_cast<char*>(&value);
                             data.insert(data.end(), pFloat, pFloat + 8);
+                        }
+                    }
+                    else if (x.first.find("COLOR") != string::npos)
+                    {
+                        dimension = 4;
+                        formatsz = 4;
+                        std::array<float, 4> value;
+
+                        //loop through draco mesh indices map
+                        for (draco::AttributeValueIndex i(0); i < (int)att->indices_map_size(); ++i)
+                        {
+                            //retrieve the index from mapped_index
+                            draco::AttributeValueIndex temp = att->mapped_index((draco::PointIndex)i.value());
+
+                            //retrieve data from draco mesh buffer with the index and convert the buffer data to "value"
+                            if (!att->ConvertValue<float, 4>(temp, &value[0]))
+                                return false;
+                            char* pFloat = reinterpret_cast<char*>(&value);
+                            data.insert(data.end(), pFloat, pFloat + 16);
                         }
                     }
                     else if (x.first == "NORMAL")
@@ -4570,7 +4615,11 @@ namespace tinygltf2
             json                 buffers;
             json bufferViews;
             //only work for one buffer only
+            assert(model->buffers.size() > 0);
             for (unsigned int i = 0; i < model->buffers.size(); i++)
+            {
+                model->buffers[i].data.clear();
+            }
             {
                 json buffer;
                 if (embedBuffers)
@@ -4581,7 +4630,6 @@ namespace tinygltf2
                 }
                 else
                 {
-                    model->buffers[i].data.clear();
                     int size = 0;
                     int offset = 0; 
                     draco::EncoderBuffer dracoBuffer;
@@ -4607,7 +4655,7 @@ namespace tinygltf2
                         }
                         offset = size;
                         size += (int)dracoBuffer.size();
-                        model->buffers[i].data.insert(model->buffers[i].data.end(), dracoBuffer.data(), dracoBuffer.data() + dracoBuffer.size());
+                        model->buffers[0].data.insert(model->buffers[0].data.end(), dracoBuffer.data(), dracoBuffer.data() + dracoBuffer.size());
                         bufferView["byteOffset"] = offset;
                         bufferView["buffer"] = 0;
                         bufferView["byteLength"] = dracoBuffer.size();
@@ -4616,7 +4664,7 @@ namespace tinygltf2
                         dracoBuffer.Clear();
                         encode.Reset();
                     }
-                    SerializeGltfBuffer(model->buffers[i], buffer, binSaveFilePath, binFilename);
+                    SerializeGltfBuffer(model->buffers[0], buffer, binSaveFilePath, binFilename);
                 }
                 buffers.push_back(buffer);
             }
@@ -4846,7 +4894,7 @@ namespace tinygltf2
             output["extensions"] = ext_j;
         }
 
-        WriteGltfFile(filename, output.dump());
+        WriteGltfFile(filename, output.dump(1));
         return true;
     }
 

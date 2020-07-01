@@ -12624,7 +12624,8 @@ namespace nlohmann
                 const bool allow_exceptions = true)
         {
             basic_json result;
-            parser(detail::input_adapter(first, last), cb, allow_exceptions).parse(true, result);
+			//GG: Ignore error: true->false
+            parser(detail::input_adapter(first, last), cb, allow_exceptions).parse(false, result);
             return result;
         }
 

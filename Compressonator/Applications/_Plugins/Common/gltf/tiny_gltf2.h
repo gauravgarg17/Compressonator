@@ -445,6 +445,7 @@ namespace tinygltf2
     struct Parameter
     {
         bool                          bool_value;
+        bool                          isNumber = false;
         std::string                   string_value;
         std::vector<double>           number_array;
         std::map<std::string, double> json_double_value;
